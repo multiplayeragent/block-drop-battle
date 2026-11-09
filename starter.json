@@ -1,0 +1,21 @@
+{
+  "name": "Block Drop Battle",
+  "genre": "puzzle",
+  "dim": "2D",
+  "mode": "Versus",
+  "players": "2–4",
+  "hook": "Clear lines to send junk to your rival.",
+  "how": "Falling blocks, like the classic. Clear two or more lines at once and a rival gets junk rows at the bottom. Last board standing wins.",
+  "controls": "Arrow keys and Space, or tap to rotate, swipe to move, swipe down to drop",
+  "uses": [
+    ["Live sync", "You see every rival's board move as they play."],
+    ["Host-run rounds", "The host's browser runs the match: who is out, the winner and the restart. If it leaves, the next player takes over."],
+    ["Bots", "Bots fill empty seats and stack and clear lines like a decent player."],
+    ["Leaderboard", "The most lines each player sent in one match."]
+  ],
+  "ideas": [
+    "Add a hold slot",
+    "Make it four players who pick a target",
+    "Add a 2-minute sprint mode"
+  ]
+}

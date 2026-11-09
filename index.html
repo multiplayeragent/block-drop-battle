@@ -1,0 +1,649 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Block Drop Battle</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #0d0b1e; }
+  body { font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #f1eeff; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; }
+  [hidden] { display: none !important; }
+  .hud { position: fixed; pointer-events: none; text-shadow: 0 1px 3px #000a; }
+  #net { bottom: max(10px, env(safe-area-inset-bottom)); left: max(12px, env(safe-area-inset-left)); font-size: 12px; opacity: .7; }
+  #hint { right: max(16px, env(safe-area-inset-right)); bottom: max(12px, env(safe-area-inset-bottom)); text-align: right; font-size: 13px; opacity: .8; max-width: 60vw; }
+  @media (max-aspect-ratio: 1/1) { #hint { left: 0; right: 0; max-width: none; text-align: center; bottom: max(30px, calc(env(safe-area-inset-bottom) + 24px)); padding: 0 12px; } }
+  #over { position: fixed; inset: 0; display: grid; place-items: center; background: #0d0b1ec0; padding: 16px; }
+  .card { width: min(360px, 92vw); max-height: 92vh; overflow: auto; box-sizing: border-box; padding: 20px; border-radius: 18px; background: #1d1838; border: 1px solid #ffffff22; text-align: center; box-shadow: 0 20px 60px #0009; }
+  .card h2 { margin: 0 0 6px; font-size: 26px; }
+  .card h3 { margin: 12px 0 0; font-size: 12px; letter-spacing: .1em; color: #a99fd6; }
+  .card ol { text-align: left; margin: 8px 0; padding-left: 26px; font-size: 14px; } .card li span { float: right; } .card li.me { color: #ffd23f; font-weight: 700; }
+  button.go { width: 100%; min-height: 48px; border: 0; border-radius: 12px; background: #ffd23f; color: #1d1838; font: 800 17px system-ui, sans-serif; cursor: pointer; margin-top: 8px; }
+  #oNext { color: #a99fd6; font-size: 13px; margin-top: 8px; }
+</style>
+<script src="https://cdn.multiplayeragent.com/sdk/mp.global.js"></script>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="safe" style="position:fixed;top:0;height:0;padding-top:env(safe-area-inset-top);pointer-events:none"></div>
+<div class="hud" id="hint"></div>
+<div class="hud" id="net">Connecting…</div>
+<div id="over" hidden><div class="card">
+  <h2 id="oTitle"></h2><ol id="places"></ol>
+  <h3>MOST LINES SENT IN A MATCH</h3><ol id="board"><li>Loading the leaderboard…</li></ol>
+  <button class="go" id="again">Play again</button><div id="oNext"></div>
+</div></div>
+<script>
+/* ═══ BLOCK DROP BATTLE · a Multiplayer Agent starter ════════════════════════════════════
+ * Clear lines to send junk to your rival. Versus, 2–4 players; bots fill empty seats.
+ *
+ * WHERE THINGS ARE (search for the "── " headers):
+ *   CONFIG ........ board size, speed, junk per clear, bots
+ *   PIECES ........ the seven block shapes and their colors
+ *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host
+ *   BOARD ......... one board's rules: falling, rotating, locking, clearing, junk rows
+ *   MATCH (HOST) .. countdown, who is still alive, the winner, the restart, the bots
+ *   BOTS (HOST) ... a bot picks the best spot for each piece and steers it there
+ *   ME ............ my board: input, gravity, sending junk, publishing
+ *   DRAW .......... my board large, rivals small, effects
+ *   SCREENS ....... hint, results, leaderboard
+ *   INPUT ......... keyboard (with key repeat), tap and swipe
+ *
+ * HOW THE MULTIPLAYER WORKS (a relay room: no server code):
+ *   - Each player's board is its OWN entity: `b` = {m, r, p, n, a, l, s, q}: match id, the
+ *     200 cells packed as one string ("." empty, a letter per block), the falling piece,
+ *     the next piece, alive, lines cleared, lines sent, junk waiting. Also `n` (name), `c`
+ *     (color) and `hb` (heartbeat).
+ *   - The HOST (lowest live sessionId) runs the match in ONE shared field, `match`: {id, v,
+ *     ph, seed, startAt, players, bots, out, winner, endsAt}. It reads every board, marks
+ *     who topped out and calls the winner. Bots' boards live in the shared field `bots`.
+ *   - Clearing 2+ lines sends junk with a "junk" event {to, n, hole}. The victim adds the
+ *     junk rows to its OWN board when its next piece locks (a clear of its own cancels it).
+ *   - Everyone gets the same piece order: a 7-piece bag shuffled from match.seed.
+ *   - ?attract plays offline with bots only (the preview video is recorded from it).
+ *   - Leaderboard "lines-sent": each player's best match.
+ */
+
+// ── CONFIG ──────────────────────────────────────────────────────────────────────────
+const CONFIG = {
+  seats: 4,             // bots fill the match up to this many boards (2–4)
+  cols: 10, rows: 20,   // board size in cells
+  gravityMs: 800,       // a piece falls one row this often at the start…
+  speedUpEvery: 25000,  // …and gets faster every 25 seconds…
+  speedUp: 0.8,         // …by this factor…
+  minGravityMs: 90,     // …down to this
+  lockMs: 500,          // a landed piece can still slide this long
+  countdownMs: 3000,    // 3, 2, 1, go
+  overMs: 9000,         // the results screen
+  junk: [0, 0, 1, 2, 4], // junk rows sent for clearing 0, 1, 2, 3 or 4 lines at once
+  botMoveMs: 140,       // a bot makes one move this often (lower is faster)
+  botMistake: 0.15,     // chance a bot settles for a worse spot
+  das: 160, arr: 45,    // key repeat: delay before it starts, then ms per step
+  board: "lines-sent",  // leaderboard name
+};
+const BOT_NAMES = ["Blocky", "Tetra", "Stacker", "Gravity", "Linus", "Quad", "Brick", "Drop Bot"];
+const COLORS = ["#ffd23f", "#4cc9f0", "#f72585", "#80ed99", "#ff9f1c", "#b388ff", "#ff6b6b", "#00f5d4"];
+
+// ── PIECES ──────────────────────────────────────────────────────────────────────────
+// Each shape is its cells in an n×n box; rotating turns the box. "G" is a junk block.
+const PIECES = {
+  I: { n: 4, cells: [[0, 1], [1, 1], [2, 1], [3, 1]], color: "#38d6f5" },
+  O: { n: 2, cells: [[0, 0], [1, 0], [0, 1], [1, 1]], color: "#ffd23f" },
+  T: { n: 3, cells: [[1, 0], [0, 1], [1, 1], [2, 1]], color: "#b467ff" },
+  S: { n: 3, cells: [[1, 0], [2, 0], [0, 1], [1, 1]], color: "#4ee08a" },
+  Z: { n: 3, cells: [[0, 0], [1, 0], [1, 1], [2, 1]], color: "#ff5a6e" },
+  J: { n: 3, cells: [[0, 0], [0, 1], [1, 1], [2, 1]], color: "#4c7dff" },
+  L: { n: 3, cells: [[2, 0], [0, 1], [1, 1], [2, 1]], color: "#ff9f1c" },
+};
+const BLOCK_COLOR = { ...Object.fromEntries(Object.entries(PIECES).map(([k, v]) => [k, v.color])), G: "#6b6788" };
+const cellsOf = (t, r) => { let c = PIECES[t].cells; for (let i = 0; i < (((r % 4) + 4) % 4); i++) c = c.map(([x, y]) => [PIECES[t].n - 1 - y, x]); return c; };
+
+// ── CONNECTION ──────────────────────────────────────────────────────────────────────
+// The builder fills these in for this game. Downloaded from GitHub? Put your own pk_ key here.
+const MP_CONNECT = {
+  key: 'pk_REPLACE_ME',
+  room: 'block-drop-battle',
+  endpoint: 'wss://live.multiplayeragent.com',
+  apiUrl: 'https://api.multiplayeragent.com',
+};
+const ATTRACT = new URLSearchParams(location.search).has("attract");
+
+/** Same shape as the SDK client, kept in this tab: offline play and ?attract. */
+function localRoom() {
+  const id = "local", state = { entities: { players: { [id]: {} } }, shared: {} }, subs = [];
+  let queued = false;
+  const emit = () => { if (!queued) { queued = true; queueMicrotask(() => { queued = false; subs.forEach((f) => f(state)); }); } };
+  const put = (o, k, v) => { if (typeof k === "object") Object.assign(o, k); else o[k] = v; emit(); };
+  return {
+    sessionId: id, state, offline: true,
+    me: { set: (k, v) => put(state.entities.players[id], k, v) },
+    setShared: (k, v) => put(state.shared, k, v),
+    onState: (f) => { subs.push(f); f(state); }, onJoin() {}, onLeave() {}, on() {}, send() {},
+    onDisconnect() {}, onReconnect() {}, leave: async () => {},
+  };
+}
+async function connect() {
+  if (ATTRACT || typeof MP === "undefined") return localRoom();
+  try {
+    const mp = await Promise.race([MP.join({ ...MP_CONNECT }), new Promise((_, no) => setTimeout(() => no(new Error("timed out")), 10000))]);
+    window.mp = mp; // the builder calls window.mp.leave() when the page closes
+    return mp;
+  } catch (e) {
+    console.warn("Playing offline:", e && e.message);
+    return localRoom();
+  }
+}
+const parse = (v, fb) => { if (typeof v !== "string") return fb; try { return JSON.parse(v); } catch { return fb; } };
+const memo = new Map();
+/** A JSON field (shared or a player's), parsed once per change. Read-only. */
+function cached(key, raw, fb) { const m = memo.get(key); if (m && m.raw === raw) return m.v; const v = parse(raw, fb); memo.set(key, { raw, v }); return v; }
+let net = null, S = { entities: { players: {} }, shared: {} };
+const seenHb = new Map();
+function livePlayers() {
+  const now = performance.now(), out = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    const s = seenHb.get(id);
+    if (!s || s.hb !== p.hb) seenHb.set(id, { hb: p.hb, at: now });
+    if (id === net.sessionId || now - seenHb.get(id).at < 3000) out.push(id);
+  }
+  return out.sort();
+}
+const isHost = () => livePlayers()[0] === net.sessionId;
+const humans = () => livePlayers().filter((id) => !(ATTRACT && id === net.sessionId));
+
+// ── BOARD ───────────────────────────────────────────────────────────────────────────
+function mulberry32(a) { return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+/** The piece order: 7-piece bags shuffled from the match seed, the same for every board. */
+function pieceBag(seed, skip = 0) {
+  const r = mulberry32(seed);
+  let q = [];
+  const next = () => { if (!q.length) { q = Object.keys(PIECES); for (let i = q.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [q[i], q[j]] = [q[j], q[i]]; } } return q.shift(); };
+  for (let i = 0; i < skip; i++) next();
+  return next;
+}
+const emptyRow = () => Array(CONFIG.cols).fill(".");
+const newBoard = (seed) => ({ grid: Array.from({ length: CONFIG.rows }, emptyRow), p: null, next: "", bag: pieceBag(seed), dealt: 0, alive: true, lines: 0, sent: 0, pending: 0, hole: 0, fallAt: 0, lockAt: 0, resets: 0 });
+function fits(B, t, r, x, y) {
+  for (const [cx, cy] of cellsOf(t, r)) {
+    const gx = x + cx, gy = y + cy;
+    if (gx < 0 || gx >= CONFIG.cols || gy >= CONFIG.rows || (gy >= 0 && B.grid[gy][gx] !== ".")) return false;
+  }
+  return true;
+}
+function deal(B) { B.dealt++; return B.bag(); }
+function spawn(B) {
+  const t = B.next || deal(B);
+  B.next = deal(B);
+  const x = t === "O" ? 4 : 3, y = t === "I" ? -1 : 0;
+  B.lockAt = 0; B.resets = 0;
+  if (fits(B, t, 0, x, y)) B.p = { t, r: 0, x, y }; else { B.p = null; B.alive = false; } // topped out
+}
+function shift(B, dx, dy) {
+  const p = B.p;
+  if (!p || !fits(B, p.t, p.r, p.x + dx, p.y + dy)) return false;
+  p.x += dx; p.y += dy;
+  if (B.lockAt && B.resets++ < 12) B.lockAt = 0; // sliding on the floor buys a little time
+  return true;
+}
+function rotate(B, dir) {
+  const p = B.p;
+  if (!p) return false;
+  for (const [kx, ky] of [[0, 0], [-1, 0], [1, 0], [-2, 0], [2, 0], [0, -1]]) { // wall kicks
+    if (fits(B, p.t, p.r + dir, p.x + kx, p.y + ky)) { p.r = (p.r + dir + 4) % 4; p.x += kx; p.y += ky; if (B.lockAt && B.resets++ < 12) B.lockAt = 0; return true; }
+  }
+  return false;
+}
+const dropY = (B) => { let y = B.p.y; while (fits(B, B.p.t, B.p.r, B.p.x, y + 1)) y++; return y; };
+/** Gravity and the lock timer. Returns what locking did, or null. */
+function stepBoard(B, now, gravity) {
+  if (!B.alive || !B.p) return null;
+  if (fits(B, B.p.t, B.p.r, B.p.x, B.p.y + 1)) { B.lockAt = 0; if (now >= B.fallAt) { B.p.y++; B.fallAt = now + gravity; } return null; }
+  if (!B.lockAt) B.lockAt = now + CONFIG.lockMs;
+  return now >= B.lockAt ? lockPiece(B) : null;
+}
+function hardDrop(B) { if (!B.p) return null; B.p.y = dropY(B); return lockPiece(B); }
+/** Lock the piece, clear full rows, settle junk, spawn the next one. Returns {cleared, send, rows}. */
+function lockPiece(B) {
+  const { t, r, x, y } = B.p;
+  for (const [cx, cy] of cellsOf(t, r)) { if (y + cy < 0) { B.alive = false; B.p = null; return { cleared: 0, send: 0, rows: [] }; } B.grid[y + cy][x + cx] = t; }
+  const rows = B.grid.map((row, i) => (row.every((c) => c !== ".") ? i : -1)).filter((i) => i >= 0);
+  B.grid = B.grid.filter((_, i) => !rows.includes(i));
+  while (B.grid.length < CONFIG.rows) B.grid.unshift(emptyRow());
+  let send = CONFIG.junk[rows.length] || 0;
+  if (rows.length) { const cancel = Math.min(B.pending, send || rows.length); B.pending -= cancel; send = Math.max(0, send - cancel); }
+  else if (B.pending) { addJunk(B, B.pending, B.hole); B.pending = 0; }
+  B.lines += rows.length; B.sent += send; B.p = null;
+  if (B.alive) spawn(B);
+  return { cleared: rows.length, send, rows };
+}
+/** Push junk rows in from the bottom (one gap per attack). Blocks pushed off the top = out. */
+function addJunk(B, n, hole) {
+  for (let i = 0; i < n; i++) {
+    if (B.grid[0].some((c) => c !== ".")) B.alive = false;
+    B.grid.shift();
+    const row = Array(CONFIG.cols).fill("G"); row[hole] = ".";
+    B.grid.push(row);
+  }
+}
+/** A board as it goes on the wire: one short JSON string. */
+const packBoard = (B, m) => JSON.stringify({ m, r: B.grid.map((row) => row.join("")).join(""), p: B.p ? [B.p.t, B.p.r, B.p.x, B.p.y] : 0, n: B.next, a: B.alive ? 1 : 0, l: B.lines, s: B.sent, q: B.pending });
+const gravityAt = (m, now) => Math.max(CONFIG.minGravityMs, CONFIG.gravityMs * CONFIG.speedUp ** Math.floor(Math.max(0, now - m.startAt) / CONFIG.speedUpEvery));
+
+// ── MATCH (HOST) ────────────────────────────────────────────────────────────────────
+const host = { last: null, was: false, bots: new Map(), botsRaw: "", lastBots: 0 };
+function match() {
+  const m = parse(S.shared.match, null);
+  return host.last && isHost() && (!m || host.last.v > m.v) ? host.last : m;
+}
+function writeMatch(m) { m = { ...m, v: (match()?.v ?? 0) + 1 }; host.last = m; net.setShared("match", JSON.stringify(m)); return m; }
+const nameOf = (m, id) => (id === net.sessionId ? myName : m?.bots.find((b) => b.i === id)?.n) || String(S.entities.players?.[id]?.n ?? "Player").slice(0, 12);
+const colorOf = (m, id) => (id === net.sessionId ? myColor : m?.bots.find((b) => b.i === id)?.c) || S.entities.players?.[id]?.c || "#aaa";
+const isBot = (m, id) => !!m && m.bots.some((b) => b.i === id);
+
+function newMatch(id) {
+  const hs = humans().slice(0, 4), used = new Set(hs.map((h) => colorOf(null, h))), free = COLORS.filter((c) => !used.has(c)), names = [...BOT_NAMES].sort(() => Math.random() - 0.5);
+  const bots = Array.from({ length: Math.max(hs.length ? 0 : 1, CONFIG.seats - hs.length) }, (_, k) => ({ i: "bot" + (k + 1), n: names[k], c: free[k % free.length] }));
+  const seed = (Math.random() * 1e9) | 0;
+  host.bots = new Map(bots.map((b) => [b.i, { B: newBoard(seed), plan: null, nextAt: 0 }]));
+  return { id, ph: "count", seed, startAt: Date.now() + CONFIG.countdownMs, players: [...hs, ...bots.map((b) => b.i)], bots, out: [], winner: "", endsAt: 0, ready: [] };
+}
+/** Become host: take the bots' boards over exactly as state has them. */
+function adopt() {
+  host.was = true; host.last = null; host.bots = new Map();
+  const m = match();
+  if (!m) return;
+  for (const v of cached("bots", S.shared.bots, [])) {
+    const B = boardFromView(v, m.seed);
+    B.bag = pieceBag(m.seed, v.k || 0); B.dealt = v.k || 0;
+    host.bots.set(v.i, { B, plan: null, nextAt: 0 });
+  }
+  for (const b of m.bots) if (!host.bots.has(b.i)) host.bots.set(b.i, { B: newBoard(m.seed), plan: null, nextAt: 0 });
+}
+function boardFromView(v, seed) {
+  const B = newBoard(seed);
+  if (typeof v.r === "string") B.grid = Array.from({ length: CONFIG.rows }, (_, y) => [...v.r.slice(y * CONFIG.cols, (y + 1) * CONFIG.cols).padEnd(CONFIG.cols, ".")]);
+  B.p = v.p ? { t: v.p[0], r: v.p[1], x: v.p[2], y: v.p[3] } : null;
+  Object.assign(B, { next: v.n || "", alive: !!v.a, lines: v.l || 0, sent: v.s || 0, pending: v.q || 0 });
+  return B;
+}
+function hostTick(now) {
+  if (!host.was) adopt();
+  let m = match();
+  if (!m) m = writeMatch(newMatch(1));
+  if (m.ph === "count" && now >= m.startAt) m = writeMatch({ ...m, ph: "play" });
+  if (m.ph === "play") { botsTick(m, now); checkOuts(match(), now); }
+  else if (m.ph === "over" && now >= m.endsAt) writeMatch(newMatch(m.id + 1));
+  writeBots();
+}
+/** Who is out: topped-out boards and players who left. One survivor wins; none is a draw. */
+function checkOuts(m, now) {
+  const ps = S.entities.players || {}, live = new Set(livePlayers());
+  const gone = m.players.filter((id) => {
+    if (m.out.includes(id)) return false;
+    if (isBot(m, id)) return !host.bots.get(id)?.B.alive;
+    if (id === net.sessionId) return me.B && me.m === m.id && !me.B.alive;
+    const b = cached("b:" + id, ps[id]?.b, null);
+    return !live.has(id) || (b && b.m === m.id && !b.a); // left, frozen (no heartbeat for 3s) or topped out
+  });
+  if (!gone.length) return;
+  const out = [...m.out, ...gone], alive = m.players.filter((id) => !out.includes(id));
+  if (alive.length <= (m.players.length > 1 ? 1 : 0)) writeMatch({ ...m, out, ph: "over", winner: alive[0] || "", endsAt: now + CONFIG.overMs, ready: [] });
+  else writeMatch({ ...m, out });
+}
+function onReady(from) {
+  const m = match();
+  if (!m || m.ph !== "over" || m.ready.includes(from)) return;
+  const ready = [...m.ready, from];
+  writeMatch({ ...m, ready, endsAt: humans().every((id) => ready.includes(id)) ? Math.min(m.endsAt, Date.now() + 1200) : m.endsAt });
+}
+/** Send junk to a random rival who is still in. */
+function attack(m, from, n) {
+  const rivals = m.players.filter((id) => id !== from && !m.out.includes(id));
+  if (!rivals.length || n <= 0) return;
+  const to = rivals[Math.floor(Math.random() * rivals.length)], hole = Math.floor(Math.random() * CONFIG.cols);
+  fx.attacks.push({ from, to, n, at: performance.now() });
+  receiveJunk(m, to, n, hole);
+  if (to !== net.sessionId && !(isHost() && host.bots.has(to))) net.send("junk", { to, n, hole, m: m.id, f: from });
+}
+/** Junk lands on my board, or (as host) on a bot's. It waits until that board's next lock. */
+function receiveJunk(m, to, n, hole) {
+  const B = to === net.sessionId ? (me.m === m.id ? me.B : null) : isHost() ? host.bots.get(to)?.B : null;
+  if (!B || !B.alive) return;
+  B.pending = Math.min(B.pending + n, CONFIG.rows); B.hole = hole;
+  if (to === net.sessionId) { fx.shake = 10; tone(110, 220, "sawtooth"); }
+}
+
+// ── BOTS (HOST) ─────────────────────────────────────────────────────────────────────
+/** Score a spot: low, flat stacks without holes, and cleared lines, are good. */
+function scoreSpot(B, t, r, x, y) {
+  const g = B.grid.map((row) => row.slice());
+  for (const [cx, cy] of cellsOf(t, r)) if (y + cy >= 0) g[y + cy][x + cx] = t;
+  const kept = g.filter((row) => row.some((c) => c === ".")), lines = CONFIG.rows - kept.length;
+  while (kept.length < CONFIG.rows) kept.unshift(emptyRow());
+  let agg = 0, holes = 0, bump = 0, prev = -1;
+  for (let c = 0; c < CONFIG.cols; c++) {
+    let h = 0, seen = false;
+    for (let rr = 0; rr < CONFIG.rows; rr++) { if (kept[rr][c] !== ".") { if (!seen) { h = CONFIG.rows - rr; seen = true; } } else if (seen) holes++; }
+    agg += h; if (prev >= 0) bump += Math.abs(h - prev); prev = h;
+  }
+  return -0.51 * agg + 0.76 * lines - 0.36 * holes - 0.18 * bump;
+}
+function planBot(B, mistake = CONFIG.botMistake) {
+  const spots = [];
+  for (let r = 0; r < 4; r++) for (let x = -2; x < CONFIG.cols; x++) {
+    if (!fits(B, B.p.t, r, x, B.p.y)) continue;
+    let y = B.p.y; while (fits(B, B.p.t, r, x, y + 1)) y++;
+    spots.push({ r, x, s: scoreSpot(B, B.p.t, r, x, y) });
+  }
+  spots.sort((a, b) => b.s - a.s);
+  return (Math.random() < mistake && spots[1 + Math.floor(Math.random() * 2)]) || spots[0] || { r: B.p.r, x: B.p.x };
+}
+/** One step toward the planned spot: rotate, then slide, then drop. Returns a lock result or null. */
+function steerBot(bot, now) {
+  const B = bot.B;
+  if (!B.p || now < bot.nextAt) return null;
+  bot.nextAt = now + CONFIG.botMoveMs * (0.7 + Math.random() * 0.6);
+  if (!bot.plan || bot.plan.piece !== B.dealt) { bot.plan = { ...planBot(B, bot.mistake), piece: B.dealt, moves: 0 }; return null; }
+  const pl = bot.plan;
+  if (pl.moves++ > 14) return hardDrop(B);
+  if (B.p.r !== pl.r) { if (!rotate(B, 1)) return hardDrop(B); return null; }
+  if (B.p.x !== pl.x) { if (!shift(B, Math.sign(pl.x - B.p.x), 0)) return hardDrop(B); return null; }
+  return hardDrop(B);
+}
+function botsTick(m, now) {
+  const grav = gravityAt(m, now);
+  for (const [id, bot] of host.bots) {
+    if (!bot.B.alive || m.out.includes(id)) continue;
+    if (!bot.B.p && bot.B.alive) { spawn(bot.B); bot.B.fallAt = now + grav; }
+    const res = steerBot(bot, now) || stepBoard(bot.B, now, grav);
+    if (res) afterLock(m, id, res);
+  }
+}
+function writeBots() {
+  const now = performance.now(), m = match();
+  if (now - host.lastBots < 110 || !m) return; // ~9/s, and only when a bot board changed
+  host.lastBots = now;
+  const raw = JSON.stringify([...host.bots].map(([i, bot]) => ({ i, k: bot.B.dealt, ...JSON.parse(packBoard(bot.B, m.id)) })));
+  if (raw !== host.botsRaw) { host.botsRaw = raw; net.setShared("bots", raw); }
+}
+
+// ── ME ──────────────────────────────────────────────────────────────────────────────
+const me = { m: 0, B: null, sent: "", lastSend: 0, autopilot: null };
+let myName = "", myColor = COLORS[0];
+try { myName = localStorage.getItem("mpa-name") || ""; } catch {}
+if (!myName) myName = ["Ace", "Pip", "Nova", "Ziggy", "Maple", "Taco"][Math.floor(Math.random() * 6)] + " " + (10 + Math.floor(Math.random() * 90));
+
+function myTick(m, now) {
+  if (m.id !== me.m) { me.m = m.id; me.B = m.players.includes(net.sessionId) ? newBoard(m.seed) : null; me.autopilot = null; publish(true); }
+  const B = me.B;
+  if (!B || m.ph !== "play" || !B.alive || m.out.includes(net.sessionId)) return publish(false);
+  if (!B.p) { spawn(B); B.fallAt = now + gravityAt(m, now); }
+  if (ATTRACT) { me.autopilot = me.autopilot || { B, plan: null, nextAt: 0 }; const res = steerBot(me.autopilot, now); if (res) afterLock(m, net.sessionId, res); }
+  repeatKeys(performance.now());
+  const res = stepBoard(B, now, keys.down ? Math.min(40, gravityAt(m, now)) : gravityAt(m, now));
+  if (res) afterLock(m, net.sessionId, res);
+  publish(false);
+}
+/** After any board locks a piece: send its junk, and show the clear. */
+function afterLock(m, id, res) {
+  if (res.send > 0) attack(m, id, res.send);
+  if (res.cleared) fx.clears.push({ id, rows: res.rows, n: res.cleared, at: performance.now() });
+  if (id === net.sessionId) {
+    if (res.cleared) { tone(520 + res.cleared * 140, 160, "triangle"); setTimeout(() => tone(780 + res.cleared * 140, 200, "triangle"), 90); } else tone(160, 60, "square", 0.03);
+    if (!me.B.alive) tone(90, 600, "sawtooth", 0.07);
+    publish(true);
+  }
+}
+function publish(force) {
+  const now = performance.now(), m = match();
+  if (!m || (!force && now - me.lastSend < 66)) return; // ~15/s at most
+  const v = me.B ? packBoard(me.B, m.id) : JSON.stringify({ m: m.id, a: 0 });
+  if (v === me.sent) return;
+  me.sent = v; me.lastSend = now;
+  net.me.set("b", v);
+}
+const canPlay = () => { const m = match(); return !ATTRACT && m && m.ph === "play" && me.B && me.B.alive && me.B.p && me.m === m.id; };
+function act(kind) {
+  if (!canPlay()) return;
+  const B = me.B, m = match();
+  if (kind === "left") shift(B, -1, 0);
+  else if (kind === "right") shift(B, 1, 0);
+  else if (kind === "down") { if (shift(B, 0, 1)) B.fallAt = Date.now() + gravityAt(m, Date.now()); }
+  else if (kind === "rotate" || kind === "ccw") { if (rotate(B, kind === "rotate" ? 1 : -1)) tone(700, 40, "sine", 0.025); }
+  else if (kind === "drop") { const res = hardDrop(B); fx.shake = Math.max(fx.shake, 4); if (res) afterLock(m, net.sessionId, res); }
+  publish(false);
+}
+
+// ── DRAW ────────────────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const cv = $("game"), ctx = cv.getContext("2d");
+let W = 0, H = 0, DPR = 1, SAFE_TOP = 0;
+function fit() { DPR = Math.min(2, devicePixelRatio || 1); W = innerWidth; H = innerHeight; cv.width = W * DPR; cv.height = H * DPR; SAFE_TOP = parseFloat(getComputedStyle($("safe")).paddingTop) || 0; }
+addEventListener("resize", fit); addEventListener("orientationchange", fit); fit();
+const fx = { clears: [], attacks: [], parts: [], shake: 0, spots: new Map(), lines: new Map() };
+
+/** Everyone's board as this client sees it: mine from memory, bots from the host or `bots`, players from their entity. */
+function boardViews(m) {
+  const ps = S.entities.players || {}, botViews = isHost() ? null : new Map(cached("bots", S.shared.bots, []).map((v) => [v.i, v]));
+  return m.players.map((id) => {
+    let v;
+    if (id === net.sessionId && me.B && me.m === m.id) v = JSON.parse(packBoard(me.B, m.id));
+    else if (isBot(m, id)) v = botViews ? botViews.get(id) : host.bots.get(id) && JSON.parse(packBoard(host.bots.get(id).B, m.id));
+    else v = cached("b:" + id, ps[id]?.b, null);
+    const live = v && v.m === m.id;
+    return { id, name: nameOf(m, id), color: colorOf(m, id), r: live ? v.r : "", p: live ? v.p : 0, n: live ? v.n : "", a: live ? !!v.a && !m.out.includes(id) : m.ph === "count", l: live ? v.l : 0, s: live ? v.s : 0, q: live ? v.q : 0 };
+  });
+}
+/** Where each board goes: mine big, rivals small beside it (or above it on a tall screen). */
+function layout(views) {
+  const mine = views.find((v) => v.id === net.sessionId && !ATTRACT) || views[0], rivals = views.filter((v) => v !== mine), n = Math.max(1, rivals.length);
+  const C = CONFIG.cols, R = CONFIG.rows, spots = new Map();
+  if (W >= H * 0.95) {
+    const big = Math.floor(Math.min((H - 120) / R, (W * 0.42) / C)), bw = big * C, side = Math.min(W - bw - 150, n * 150);
+    const small = Math.floor(Math.min((side - 24 * n) / (n * C), (H * 0.6) / R)), x0 = Math.round((W - (bw + 110 + n * (small * C + 24))) / 2);
+    spots.set(mine.id, { x: x0, y: Math.round((H - big * R) / 2), cell: big, big: true });
+    rivals.forEach((v, i) => spots.set(v.id, { x: x0 + bw + 110 + i * (small * C + 24), y: Math.round(H / 2 - (small * R) / 2), cell: small }));
+  } else {
+    const small = Math.floor(Math.min((W - 40 - 16 * n) / (n * C), (H * 0.2) / R)), top = SAFE_TOP + 24;
+    const big = Math.floor(Math.min((W - 110) / C, (H - top - small * R - 182) / R)), bx = Math.round((W - big * C) / 2) - 30;
+    rivals.forEach((v, i) => spots.set(v.id, { x: Math.round((W - n * (small * C + 16)) / 2 + 8 + i * (small * C + 16)), y: top + 16, cell: small }));
+    spots.set(mine.id, { x: bx, y: top + small * R + 72, cell: big, big: true });
+  }
+  return spots;
+}
+function drawCell(x, y, s, color, ghost) {
+  if (ghost) { ctx.strokeStyle = color + "88"; ctx.lineWidth = Math.max(1, s * 0.08); ctx.strokeRect(x + 1.5, y + 1.5, s - 3, s - 3); return; }
+  ctx.fillStyle = color; ctx.fillRect(x, y, s, s);
+  if (s < 8) return;
+  ctx.fillStyle = "#ffffff40"; ctx.fillRect(x, y, s, s * 0.16); ctx.fillRect(x, y, s * 0.16, s);
+  ctx.fillStyle = "#00000040"; ctx.fillRect(x, y + s * 0.84, s, s * 0.16); ctx.fillRect(x + s * 0.84, y, s * 0.16, s);
+}
+function drawBoard(v, sp, now) {
+  const C = CONFIG.cols, R = CONFIG.rows, s = sp.cell, w = C * s, h = R * s;
+  let { x, y } = sp;
+  if (sp.big && fx.shake > 0) { x += (Math.random() - 0.5) * fx.shake; y += (Math.random() - 0.5) * fx.shake; }
+  ctx.fillStyle = "#16132e"; ctx.fillRect(x - 4, y - 4, w + 8, h + 8);
+  ctx.strokeStyle = v.color; ctx.lineWidth = sp.big ? 3 : 2; ctx.strokeRect(x - 4, y - 4, w + 8, h + 8);
+  if (sp.big) { ctx.strokeStyle = "#ffffff0a"; ctx.lineWidth = 1; ctx.beginPath(); for (let i = 1; i < C; i++) { ctx.moveTo(x + i * s, y); ctx.lineTo(x + i * s, y + h); } for (let j = 1; j < R; j++) { ctx.moveTo(x, y + j * s); ctx.lineTo(x + w, y + j * s); } ctx.stroke(); }
+  for (let j = 0; j < R; j++) for (let i = 0; i < C; i++) { const c = v.r[j * C + i]; if (c && c !== ".") drawCell(x + i * s, y + j * s, s, BLOCK_COLOR[c] || "#888"); }
+  if (v.p && PIECES[v.p[0]]) {
+    const [t, r, px, py] = v.p, cells = cellsOf(t, r);
+    if (sp.big && v.id === net.sessionId && me.B && me.B.p) { const gy = dropY(me.B); for (const [cx, cy] of cells) if (gy + cy >= 0) drawCell(x + (px + cx) * s, y + (gy + cy) * s, s, PIECES[t].color, true); }
+    for (const [cx, cy] of cells) if (py + cy >= 0) drawCell(x + (px + cx) * s, y + (py + cy) * s, s, PIECES[t].color);
+  }
+  for (const c of fx.clears) if (c.id === v.id) { const k = 1 - (now - c.at) / 350; if (k > 0) { ctx.fillStyle = `rgba(255,255,255,${k * 0.85})`; if (sp.big) for (const row of c.rows) ctx.fillRect(x, y + row * s, w, s); else ctx.fillRect(x, y + h - c.n * s, w, c.n * s); } }
+  if (v.q > 0) { ctx.fillStyle = "#ff3b5c"; ctx.fillRect(x - (sp.big ? 14 : 8), y + h - Math.min(R, v.q) * s, sp.big ? 7 : 4, Math.min(R, v.q) * s); } // junk on its way
+  ctx.textAlign = "center"; ctx.fillStyle = v.color; ctx.font = `800 ${sp.big ? 16 : 12}px system-ui, sans-serif`;
+  ctx.fillText(v.id === net.sessionId ? "You" : v.name, x + w / 2, y - 12);
+  ctx.fillStyle = "#cfc8f5"; ctx.font = `600 ${sp.big ? 13 : 11}px system-ui, sans-serif`;
+  ctx.fillText(`sent ${v.s}`, x + w / 2, y + h + (sp.big ? 22 : 16));
+  if (!v.a && match()?.ph !== "count") {
+    ctx.fillStyle = "#0d0b1ebb"; ctx.fillRect(x - 4, y - 4, w + 8, h + 8);
+    ctx.fillStyle = "#ff5a6e"; ctx.font = `900 ${Math.max(16, s * 2)}px system-ui, sans-serif`; ctx.fillText("KO", x + w / 2, y + h / 2 + s * 0.7);
+  }
+  if (sp.big && v.n && PIECES[v.n]) { // the next piece
+    const nx = x + w + 18, ns = Math.max(10, Math.floor(s * 0.7));
+    ctx.fillStyle = "#cfc8f5"; ctx.font = "700 12px system-ui, sans-serif"; ctx.textAlign = "left"; ctx.fillText("NEXT", nx, y + 10);
+    for (const [cx, cy] of cellsOf(v.n, 0)) drawCell(nx + cx * ns, y + 22 + cy * ns, ns, PIECES[v.n].color);
+  }
+}
+function draw(m, now) {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const grd = ctx.createLinearGradient(0, 0, 0, H); grd.addColorStop(0, "#1a1240"); grd.addColorStop(1, "#0b0a1a");
+  ctx.fillStyle = grd; ctx.fillRect(0, 0, W, H);
+  if (!m) return;
+  const views = boardViews(m), spots = layout(views);
+  fx.spots = spots;
+  for (const v of views) {
+    if (v.l > (fx.lines.get(v.id) ?? v.l) && v.id !== net.sessionId && !(isHost() && host.bots.has(v.id))) fx.clears.push({ id: v.id, rows: [], n: v.l - fx.lines.get(v.id), at: now });
+    fx.lines.set(v.id, v.l);
+    drawBoard(v, spots.get(v.id), now);
+  }
+  for (const a of fx.attacks) { // junk flying from one board to another
+    const k = (now - a.at) / 450, from = spots.get(a.from), to = spots.get(a.to);
+    if (k > 1 || !from || !to) continue;
+    const fxp = from.x + (from.cell * CONFIG.cols) / 2, fyp = from.y + from.cell * 6, tx = to.x + (to.cell * CONFIG.cols) / 2, ty = to.y + to.cell * CONFIG.rows * 0.8;
+    const px = fxp + (tx - fxp) * k, py = fyp + (ty - fyp) * k - Math.sin(k * Math.PI) * 80;
+    ctx.fillStyle = "#ff3b5c"; for (let i = 0; i < a.n; i++) ctx.fillRect(px - 6 + i * 4, py - 6 - i * 4, 12, 12);
+    if (k > 0.9) for (let i = 0; i < 3; i++) fx.parts.push({ x: tx, y: ty, vx: (Math.random() - 0.5) * 300, vy: -Math.random() * 250, life: 1, c: "#ff3b5c" });
+  }
+  for (const c of fx.clears) if (now - c.at < 20 && c.rows.length) { const sp = spots.get(c.id); if (sp) for (const row of c.rows) for (let i = 0; i < 10; i++) fx.parts.push({ x: sp.x + Math.random() * sp.cell * CONFIG.cols, y: sp.y + (row + 0.5) * sp.cell, vx: (Math.random() - 0.5) * 420, vy: -Math.random() * 300, life: 1, c: pickColor() }); }
+  for (let i = fx.parts.length - 1; i >= 0; i--) { const p = fx.parts[i]; p.life -= 0.03; p.vy += 12; p.x += p.vx / 60; p.y += p.vy / 60; if (p.life <= 0) { fx.parts.splice(i, 1); continue; } ctx.globalAlpha = p.life; ctx.fillStyle = p.c; ctx.fillRect(p.x - 3, p.y - 3, 6, 6); }
+  ctx.globalAlpha = 1;
+  fx.clears = fx.clears.filter((c) => now - c.at < 400); fx.attacks = fx.attacks.filter((a) => now - a.at < 500); fx.shake *= 0.85;
+  const t = Date.now();
+  if (m.ph === "count") { const n = Math.ceil((m.startAt - t) / 1000); big(n > 0 ? String(n) : "GO!", "#ffd23f"); }
+  else if (m.ph === "play" && t - m.startAt < 700) big("GO!", "#80ed99");
+  else if (m.ph === "play" && !m.players.includes(net.sessionId) && !ATTRACT) big("Watching", "#cfc8f5", "You'll play in the next match");
+}
+const pickColor = () => Object.values(PIECES)[Math.floor(Math.random() * 7)].color;
+function big(text, color, sub) {
+  ctx.textAlign = "center"; ctx.font = `900 ${Math.min(96, W * 0.16)}px system-ui, sans-serif`;
+  ctx.lineWidth = 8; ctx.strokeStyle = "#0d0b1e"; ctx.strokeText(text, W / 2, H * 0.45); ctx.fillStyle = color; ctx.fillText(text, W / 2, H * 0.45);
+  if (sub) { ctx.font = "700 16px system-ui, sans-serif"; ctx.fillStyle = "#fff"; ctx.fillText(sub, W / 2, H * 0.45 + 36); }
+}
+
+// ── SCREENS ─────────────────────────────────────────────────────────────────────────
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+let AC = null;
+function unlockAudio() { if (!AC && !ATTRACT) try { AC = new AudioContext(); } catch {} }
+function tone(f, ms, type = "sine", vol = 0.05) {
+  if (!AC) return;
+  const o = AC.createOscillator(), gn = AC.createGain(), t = AC.currentTime;
+  o.type = type; o.frequency.value = f; gn.gain.setValueAtTime(vol, t); gn.gain.exponentialRampToValueAtTime(0.0001, t + ms / 1000);
+  o.connect(gn).connect(AC.destination); o.start(t); o.stop(t + ms / 1000);
+}
+let overFor = -1, board = null;
+function hud(m) {
+  const n = humans().length;
+  $("net").textContent = ATTRACT ? "" : net.offline ? "Offline: playing with bots" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the match" : ""}`;
+  if (!m) return;
+  const early = m.ph === "count" || (m.ph === "play" && Date.now() - m.startAt < 12000 && m.id <= 2);
+  $("hint").textContent = ATTRACT || !early ? "" : touchUI ? "Tap to rotate · swipe to move · swipe down to drop · clear 2+ lines to send junk" : "← → move · ↑ rotate · ↓ soft drop · Space drop · clear 2+ lines to send junk";
+  $("over").hidden = m.ph !== "over" || ATTRACT;
+  if (m.ph !== "over") return;
+  const views = boardViews(m), place = [...m.players].sort((a, b) => (b === m.winner) - (a === m.winner) || m.out.indexOf(b) - m.out.indexOf(a));
+  $("oTitle").textContent = !m.winner ? "Draw!" : m.winner === net.sessionId ? "You win!" : `${nameOf(m, m.winner)} wins!`;
+  const html = place.map((id) => { const v = views.find((x) => x.id === id); return `<li class="${id === net.sessionId ? "me" : ""}">${esc(nameOf(m, id))}<span>${v ? v.s : 0} sent</span></li>`; }).join("");
+  if ($("places").innerHTML !== html) $("places").innerHTML = html;
+  $("oNext").textContent = `Next match in ${Math.max(0, Math.ceil((m.endsAt - Date.now()) / 1000))}s`;
+  $("again").textContent = m.ready.includes(net.sessionId) ? "Ready ✓" : "Play again";
+  if (overFor === m.id) return;
+  overFor = m.id;
+  const list = $("board"), sent = me.B && me.m === m.id ? me.B.sent : 0;
+  if (m.winner === net.sessionId) tone(660, 400, "triangle", 0.07);
+  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  list.innerHTML = "<li>Loading…</li>";
+  (sent > 0 ? board.submit(sent).catch(() => null) : Promise.resolve()).then(() => board.top(10)).then(({ entries }) => {
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${e.score}</span></li>`).join("") : "<li>No scores yet. Send some junk.</li>";
+  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+}
+$("again").addEventListener("click", () => { if (isHost()) onReady(net.sessionId); else net.send("ready", { r: 1 }); });
+
+/** Two players picked one color (they joined at once): the later sessionId picks another. */
+function fixColor() {
+  const ps = S.entities.players || {};
+  if (!Object.entries(ps).some(([id, p]) => id < net.sessionId && p.c === myColor)) return;
+  const taken = new Set(Object.entries(ps).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c));
+  myColor = COLORS.find((c) => !taken.has(c)) || myColor;
+  net.me.set("c", myColor);
+}
+
+// ── INPUT ───────────────────────────────────────────────────────────────────────────
+const touchUI = matchMedia("(pointer: coarse)").matches;
+const keys = { left: false, right: false, down: false, held: "", heldAt: 0, stepAt: 0 };
+const KEYMAP = { ArrowLeft: "left", a: "left", ArrowRight: "right", d: "right", ArrowDown: "down", s: "down", ArrowUp: "rotate", w: "rotate", x: "rotate", z: "ccw", " ": "drop" };
+addEventListener("keydown", (e) => {
+  const k = KEYMAP[e.key.length === 1 ? e.key.toLowerCase() : e.key];
+  if (!k) return;
+  e.preventDefault(); unlockAudio();
+  if (e.repeat) return;
+  if (k === "left" || k === "right") { keys[k] = true; keys.held = k; keys.heldAt = performance.now(); act(k); }
+  else if (k === "down") keys.down = true;
+  else act(k);
+});
+addEventListener("keyup", (e) => {
+  const k = KEYMAP[e.key.length === 1 ? e.key.toLowerCase() : e.key];
+  if (k === "left" || k === "right") { keys[k] = false; if (keys.held === k) keys.held = keys.left ? "left" : keys.right ? "right" : ""; keys.heldAt = performance.now(); }
+  if (k === "down") keys.down = false;
+});
+addEventListener("blur", () => Object.assign(keys, { left: false, right: false, down: false, held: "" }));
+/** Held left/right: one step, a pause (das), then a step every arr ms. */
+function repeatKeys(now) {
+  if (!keys.held || now - keys.heldAt < CONFIG.das || now < keys.stepAt) return;
+  keys.stepAt = now + CONFIG.arr; act(keys.held);
+}
+// Touch: tap = rotate, drag sideways = move a column per step, drag down = soft drop, flick down = drop.
+const swipe = { id: -1, x: 0, y: 0, x0: 0, y0: 0, t0: 0, moved: false };
+cv.addEventListener("pointerdown", (e) => { e.preventDefault(); unlockAudio(); Object.assign(swipe, { id: e.pointerId, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t0: performance.now(), moved: false }); cv.setPointerCapture(e.pointerId); });
+cv.addEventListener("pointermove", (e) => {
+  if (e.pointerId !== swipe.id) return;
+  const step = Math.max(18, (fx.spots.get(net.sessionId)?.cell || 28) * 0.9);
+  while (e.clientX - swipe.x > step) { act("right"); swipe.x += step; swipe.moved = true; }
+  while (swipe.x - e.clientX > step) { act("left"); swipe.x -= step; swipe.moved = true; }
+  while (e.clientY - swipe.y > step * 1.2) { act("down"); swipe.y += step * 1.2; swipe.moved = true; }
+});
+cv.addEventListener("pointerup", (e) => {
+  if (e.pointerId !== swipe.id) return;
+  swipe.id = -1;
+  const dx = e.clientX - swipe.x0, dy = e.clientY - swipe.y0, ms = performance.now() - swipe.t0;
+  if (dy > 50 && dy > Math.abs(dx) * 1.5 && ms < 280) act("drop");
+  else if (!swipe.moved && Math.hypot(dx, dy) < 12) act("rotate");
+});
+cv.addEventListener("pointercancel", () => { swipe.id = -1; });
+document.addEventListener("touchmove", (e) => { if (!e.target.closest(".card")) e.preventDefault(); }, { passive: false });
+
+// ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
+let lastHb = 0, lastHud = 0;
+function frame(now) {
+  if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); }
+  if (isHost()) hostTick(Date.now()); else host.was = false;
+  const m = match();
+  if (m) { myTick(m, Date.now()); if (m.ph !== "play") fixColor(); }
+  draw(m, now);
+  if (now - lastHud > 150) { lastHud = now; hud(m); }
+  requestAnimationFrame(frame);
+}
+
+(async function start() {
+  if (ATTRACT) Object.assign(CONFIG, { countdownMs: 200, gravityMs: 260, speedUpEvery: 4000, botMoveMs: 55, botMistake: 0.3, junk: [0, 1, 2, 3, 5], overMs: 3000 });
+  net = await connect();
+  net.onState((st) => { S = st; });
+  net.onDisconnect(() => { $("net").textContent = "Reconnecting…"; });
+  net.on("junk", (msg, from) => { const m = match(); if (msg && m && msg.m === m.id) { fx.attacks.push({ from: msg.f || from, to: msg.to, n: msg.n, at: performance.now() }); receiveJunk(m, msg.to, Math.min(8, msg.n | 0), Math.abs(msg.hole | 0) % CONFIG.cols); } });
+  net.on("ready", (msg, from) => { if (isHost()) onReady(from); });
+  if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
+  const taken = new Set(Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c));
+  myColor = COLORS.find((c) => !taken.has(c)) || COLORS[Math.floor(Math.random() * COLORS.length)];
+  net.me.set({ n: myName, c: myColor, hb: Date.now() });
+  if (ATTRACT) { // the preview starts mid-match: half-full boards, so lines clear and junk flies at once
+    const m = writeMatch(newMatch(1));
+    for (const [id, bot] of host.bots) for (let y = id === "bot1" ? 16 : 11; y < CONFIG.rows; y++) { const hole = Math.floor(Math.random() * CONFIG.cols); bot.B.grid[y] = bot.B.grid[y].map((_, x) => (x === hole || Math.random() < 0.12 ? "." : "G")); }
+    host.lastBots = 0; writeBots(); void m;
+    adopt(); host.bots.get("bot1").mistake = 0.04; // the big board in the preview plays a little better
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
