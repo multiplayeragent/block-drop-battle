@@ -534,9 +534,10 @@ function tone(f, ms, type = "sine", vol = 0.05) {
   o.connect(gn).connect(AC.destination); o.start(t); o.stop(t + ms / 1000);
 }
 let overFor = -1, board = null;
+let dropped = false; // true while the connection is down: the HUD keeps showing "Reconnecting…"
 function hud(m) {
   const n = humans().length;
-  $("net").textContent = ATTRACT ? "" : net.offline ? "Offline: playing with bots" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the match" : ""}`;
+  $("net").textContent = ATTRACT ? "" : net.offline ? "Offline: playing with bots" : dropped ? "Reconnecting…" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the match" : ""}`;
   if (!m) return;
   const early = m.ph === "count" || (m.ph === "play" && Date.now() - m.startAt < 12000 && m.id <= 2);
   $("hint").textContent = ATTRACT || !early ? "" : touchUI ? "Tap to rotate · swipe to move · swipe down to drop · clear 2+ lines to send junk" : "← → move · ↑ rotate · ↓ soft drop · Space drop · clear 2+ lines to send junk";
@@ -560,11 +561,11 @@ function hud(m) {
 }
 $("again").addEventListener("click", () => { if (isHost()) onReady(net.sessionId); else net.send("ready", { r: 1 }); });
 
-/** Two players picked one color (they joined at once): the later sessionId picks another. */
+/** Two players picked one color (they joined at once), or a bot has mine: the later sessionId picks another. */
 function fixColor() {
-  const ps = S.entities.players || {};
-  if (!Object.entries(ps).some(([id, p]) => id < net.sessionId && p.c === myColor)) return;
-  const taken = new Set(Object.entries(ps).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c));
+  const ps = S.entities.players || {}, botColors = (match()?.bots || []).map((b) => b.c);
+  if (!Object.entries(ps).some(([id, p]) => id < net.sessionId && p.c === myColor) && !botColors.includes(myColor)) return;
+  const taken = new Set([...Object.entries(ps).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c), ...botColors]);
   myColor = COLORS.find((c) => !taken.has(c)) || myColor;
   net.me.set("c", myColor);
 }
@@ -629,11 +630,12 @@ function frame(now) {
   if (ATTRACT) Object.assign(CONFIG, { countdownMs: 200, gravityMs: 260, speedUpEvery: 4000, botMoveMs: 55, botMistake: 0.3, junk: [0, 1, 2, 3, 5], overMs: 3000 });
   net = await connect();
   net.onState((st) => { S = st; });
-  net.onDisconnect(() => { $("net").textContent = "Reconnecting…"; });
+  net.onDisconnect(() => { dropped = true; $("net").textContent = "Reconnecting…"; });
+  net.onReconnect(() => { dropped = false; });
   net.on("junk", (msg, from) => { const m = match(); if (msg && m && msg.m === m.id) { fx.attacks.push({ from: msg.f || from, to: msg.to, n: msg.n, at: performance.now() }); receiveJunk(m, msg.to, Math.min(8, msg.n | 0), Math.abs(msg.hole | 0) % CONFIG.cols); } });
   net.on("ready", (msg, from) => { if (isHost()) onReady(from); });
   if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
-  const taken = new Set(Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c));
+  const taken = new Set([...Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c), ...(match()?.bots || []).map((b) => b.c)]);
   myColor = COLORS.find((c) => !taken.has(c)) || COLORS[Math.floor(Math.random() * COLORS.length)];
   net.me.set({ n: myName, c: myColor, hb: Date.now() });
   if (ATTRACT) { // the preview starts mid-match: half-full boards, so lines clear and junk flies at once
