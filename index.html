@@ -617,13 +617,13 @@ document.addEventListener("touchmove", (e) => { if (!e.target.closest(".card")) 
 // ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
 let lastHb = 0, lastHud = 0;
 function frame(now) {
+  requestAnimationFrame(frame);
   if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); }
   if (isHost()) hostTick(Date.now()); else host.was = false;
   const m = match();
   if (m) { myTick(m, Date.now()); if (m.ph !== "play") fixColor(); }
   draw(m, now);
   if (now - lastHud > 150) { lastHud = now; hud(m); }
-  requestAnimationFrame(frame);
 }
 
 (async function start() {
