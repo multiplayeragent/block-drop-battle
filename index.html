@@ -18,6 +18,7 @@
   .card h2 { margin: 0 0 6px; font-size: 26px; }
   .card h3 { margin: 12px 0 0; font-size: 12px; letter-spacing: .1em; color: #a99fd6; }
   .card ol { text-align: left; margin: 8px 0; padding-left: 26px; font-size: 14px; } .card li span { float: right; } .card li.me { color: #ffd23f; font-weight: 700; }
+  .card li.note { list-style: none; margin-left: -26px; text-align: center; opacity: .8; }
   button.go { width: 100%; min-height: 48px; border: 0; border-radius: 12px; background: #ffd23f; color: #1d1838; font: 800 17px system-ui, sans-serif; cursor: pointer; margin-top: 8px; }
   #oNext { color: #a99fd6; font-size: 13px; margin-top: 8px; }
 </style>
@@ -30,7 +31,7 @@
 <div class="hud" id="net">Connecting…</div>
 <div id="over" hidden><div class="card">
   <h2 id="oTitle"></h2><ol id="places"></ol>
-  <h3>MOST LINES SENT IN A MATCH</h3><ol id="board"><li>Loading the leaderboard…</li></ol>
+  <h3>MOST LINES SENT IN A MATCH</h3><ol id="board"><li class="note">Loading the leaderboard…</li></ol>
   <button class="go" id="again">Play again</button><div id="oNext"></div>
 </div></div>
 <script>
@@ -76,6 +77,7 @@ const CONFIG = {
   countdownMs: 3000,    // 3, 2, 1, go
   overMs: 9000,         // the results screen
   junk: [0, 0, 1, 2, 4], // junk rows sent for clearing 0, 1, 2, 3 or 4 lines at once
+  botThinkMs: [250, 650], // a bot looks at each new piece this long before it moves it (min, max)
   botMoveMs: 140,       // a bot makes one move this often (lower is faster)
   botMistake: 0.15,     // chance a bot settles for a worse spot
   das: 160, arr: 45,    // key repeat: delay before it starts, then ms per step
@@ -344,7 +346,7 @@ function steerBot(bot, now) {
   const B = bot.B;
   if (!B.p || now < bot.nextAt) return null;
   bot.nextAt = now + CONFIG.botMoveMs * (0.7 + Math.random() * 0.6);
-  if (!bot.plan || bot.plan.piece !== B.dealt) { bot.plan = { ...planBot(B, bot.mistake), piece: B.dealt, moves: 0 }; return null; }
+  if (!bot.plan || bot.plan.piece !== B.dealt) { bot.plan = { ...planBot(B, bot.mistake), piece: B.dealt, moves: 0 }; const [lo, hi] = CONFIG.botThinkMs; bot.nextAt = now + lo + Math.random() * (hi - lo); return null; } // a new piece: look at it first, like a person
   const pl = bot.plan;
   if (pl.moves++ > 14) return hardDrop(B);
   if (B.p.r !== pl.r) { if (!rotate(B, 1)) return hardDrop(B); return null; }
@@ -535,6 +537,7 @@ function tone(f, ms, type = "sine", vol = 0.05) {
   o.connect(gn).connect(AC.destination); o.start(t); o.stop(t + ms / 1000);
 }
 let overFor = -1, board = null;
+const NOTE = (text) => `<li class="note">${text}</li>`; // a status line in a list, not a numbered entry
 let dropped = false; // true while the connection is down: the HUD keeps showing "Reconnecting…"
 function hud(m) {
   const n = humans().length;
@@ -554,11 +557,11 @@ function hud(m) {
   overFor = m.id;
   const list = $("board"), sent = me.B && me.m === m.id ? me.B.sent : 0;
   if (m.winner === net.sessionId) tone(660, 400, "triangle", 0.07);
-  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
-  list.innerHTML = "<li>Loading…</li>";
+  if (!board) { list.innerHTML = NOTE("Leaderboards need a connection."); return; }
+  list.innerHTML = NOTE("Loading…");
   (sent > 0 ? board.submit(sent).catch(() => null) : Promise.resolve()).then(() => board.top(10)).then(({ entries }) => {
-    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${e.score}</span></li>`).join("") : "<li>No scores yet. Send some junk.</li>";
-  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${e.score}</span></li>`).join("") : NOTE("No scores yet. Send some junk.");
+  }).catch(() => { list.innerHTML = NOTE("Couldn't load the leaderboard."); });
 }
 $("again").addEventListener("click", () => { if (isHost()) onReady(net.sessionId); else net.send("ready", { r: 1 }); });
 
@@ -597,7 +600,8 @@ function repeatKeys(now) {
 }
 // Touch: tap = rotate, drag sideways = move a column per step, drag down = soft drop, flick down = drop.
 const swipe = { id: -1, x: 0, y: 0, x0: 0, y0: 0, t0: 0, moved: false };
-cv.addEventListener("pointerdown", (e) => { e.preventDefault(); unlockAudio(); Object.assign(swipe, { id: e.pointerId, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t0: performance.now(), moved: false }); cv.setPointerCapture(e.pointerId); });
+cv.addEventListener("contextmenu", (e) => e.preventDefault());
+cv.addEventListener("pointerdown", (e) => { e.preventDefault(); if (e.button !== 0) return; /* only a finger or the main mouse button */ unlockAudio(); Object.assign(swipe, { id: e.pointerId, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t0: performance.now(), moved: false }); cv.setPointerCapture(e.pointerId); });
 cv.addEventListener("pointermove", (e) => {
   if (e.pointerId !== swipe.id) return;
   const step = Math.max(18, (fx.spots.get(net.sessionId)?.cell || 28) * 0.9);
@@ -630,7 +634,7 @@ function frame(now) {
 }
 
 (async function start() {
-  if (ATTRACT) Object.assign(CONFIG, { countdownMs: 200, gravityMs: 260, speedUpEvery: 4000, botMoveMs: 55, botMistake: 0.3, junk: [0, 1, 2, 3, 5], overMs: 3000 });
+  if (ATTRACT) Object.assign(CONFIG, { countdownMs: 200, gravityMs: 260, speedUpEvery: 4000, botThinkMs: [0, 60], botMoveMs: 55, botMistake: 0.3, junk: [0, 1, 2, 3, 5], overMs: 3000 });
   net = await connect();
   net.onState((st) => { S = st; });
   net.onDisconnect(() => { dropped = true; $("net").textContent = "Reconnecting…"; });
