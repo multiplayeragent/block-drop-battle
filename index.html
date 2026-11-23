@@ -58,7 +58,7 @@
  *   - The HOST (lowest live sessionId) runs the match in ONE shared field, `match`: {id, v,
  *     ph, seed, startAt, players, bots, out, winner, endsAt}. It reads every board, marks
  *     who topped out and calls the winner. Bots' boards live in the shared field `bots`.
- *   - Clearing 2+ lines sends junk with a "junk" event {to, n, hole}. The victim adds the
+ *   - Clearing 2+ lines sends junk with a "junk" event {to, n, hole, m, f}, checked by junkOk(). The victim adds the
  *     junk rows to its OWN board when its next piece locks (a clear of its own cancels it).
  *   - Everyone gets the same piece order: a 7-piece bag shuffled from match.seed.
  *   - ?attract plays offline with bots only (the preview video is recorded from it).
@@ -73,7 +73,8 @@ const CONFIG = {
   speedUpEvery: 25000,  // …and gets faster every 25 seconds…
   speedUp: 0.8,         // …by this factor…
   minGravityMs: 90,     // …down to this
-  lockMs: 500,          // a landed piece can still slide this long
+  lockMs: 500,          // a landed piece can still slide this long…
+  lockResets: 12,       // …and moving or turning it on the floor restarts that wait at most this many times
   countdownMs: 3000,    // 3, 2, 1, go
   overMs: 9000,         // the results screen
   junk: [0, 0, 1, 2, 4], // junk rows sent for clearing 0, 1, 2, 3 or 4 lines at once
@@ -185,14 +186,14 @@ function shift(B, dx, dy) {
   const p = B.p;
   if (!p || !fits(B, p.t, p.r, p.x + dx, p.y + dy)) return false;
   p.x += dx; p.y += dy;
-  if (B.lockAt && B.resets++ < 12) B.lockAt = 0; // sliding on the floor buys a little time
+  if (B.lockAt && B.resets++ < CONFIG.lockResets) B.lockAt = 0; // sliding on the floor buys a little time
   return true;
 }
 function rotate(B, dir) {
   const p = B.p;
   if (!p) return false;
   for (const [kx, ky] of [[0, 0], [-1, 0], [1, 0], [-2, 0], [2, 0], [0, -1]]) { // wall kicks
-    if (fits(B, p.t, p.r + dir, p.x + kx, p.y + ky)) { p.r = (p.r + dir + 4) % 4; p.x += kx; p.y += ky; if (B.lockAt && B.resets++ < 12) B.lockAt = 0; return true; }
+    if (fits(B, p.t, p.r + dir, p.x + kx, p.y + ky)) { p.r = (p.r + dir + 4) % 4; p.x += kx; p.y += ky; if (B.lockAt && B.resets++ < CONFIG.lockResets) B.lockAt = 0; return true; }
   }
   return false;
 }
@@ -201,7 +202,7 @@ const dropY = (B) => { let y = B.p.y; while (fits(B, B.p.t, B.p.r, B.p.x, y + 1)
 function stepBoard(B, now, gravity) {
   if (!B.alive || !B.p) return null;
   if (fits(B, B.p.t, B.p.r, B.p.x, B.p.y + 1)) { B.lockAt = 0; if (now >= B.fallAt) { B.p.y++; B.fallAt = now + gravity; } return null; }
-  if (!B.lockAt) B.lockAt = now + CONFIG.lockMs;
+  if (!B.lockAt) B.lockAt = now + (B.resets >= CONFIG.lockResets ? 0 : CONFIG.lockMs); // out of resets (turned up off the floor): it locks as it lands
   return now >= B.lockAt ? lockPiece(B) : null;
 }
 function hardDrop(B) { if (!B.p) return null; B.p.y = dropY(B); return lockPiece(B); }
@@ -307,6 +308,20 @@ function attack(m, from, n) {
   fx.attacks.push({ from, to, n, at: performance.now() });
   receiveJunk(m, to, n, hole);
   if (to !== net.sessionId && !(isHost() && host.bots.has(to))) net.send("junk", { to, n, hole, m: m.id, f: from });
+}
+/** Is this "junk" intent real? From a player in this match (a bot's only from the host), a legal
+ *  amount, and no more in total than the sender has published as sent (plus room for one in flight). */
+const junkIn = new Map(); // "match:sender" -> junk rows accepted from that sender
+function junkOk(m, msg, from) {
+  const f = String(msg.f || from), n = msg.n, maxJunk = Math.max(...CONFIG.junk);
+  if (!m.players.includes(f) || !m.players.includes(msg.to) || msg.to === f) return false;
+  if (!Number.isInteger(n) || n <= 0 || !CONFIG.junk.includes(n) || !Number.isInteger(msg.hole) || msg.hole < 0 || msg.hole >= CONFIG.cols) return false;
+  if (isBot(m, f) ? from !== livePlayers()[0] : from !== f) return false; // a bot's junk comes from the host, a player's from itself
+  const v = isBot(m, f) ? cached("bots", S.shared.bots, []).find((x) => x.i === f) : cached("b:" + f, S.entities.players?.[f]?.b, null);
+  const sent = v && v.m === m.id ? v.s || 0 : 0, key = m.id + ":" + f, got = (junkIn.get(key) || 0) + n;
+  if (got > sent + 2 * maxJunk) return false;
+  junkIn.set(key, got);
+  return true;
 }
 /** Junk lands on my board, or (as host) on a bot's. It waits until that board's next lock. */
 function receiveJunk(m, to, n, hole) {
@@ -639,7 +654,7 @@ function frame(now) {
   net.onState((st) => { S = st; });
   net.onDisconnect(() => { dropped = true; $("net").textContent = "Reconnecting…"; });
   net.onReconnect(() => { dropped = false; });
-  net.on("junk", (msg, from) => { const m = match(); if (msg && m && msg.m === m.id) { fx.attacks.push({ from: msg.f || from, to: msg.to, n: msg.n, at: performance.now() }); receiveJunk(m, msg.to, Math.min(8, msg.n | 0), Math.abs(msg.hole | 0) % CONFIG.cols); } });
+  net.on("junk", (msg, from) => { const m = match(); if (msg && m && msg.m === m.id && junkOk(m, msg, from)) { fx.attacks.push({ from: String(msg.f || from), to: msg.to, n: msg.n, at: performance.now() }); receiveJunk(m, msg.to, msg.n, msg.hole); } });
   net.on("ready", (msg, from) => { if (isHost()) onReady(from); });
   if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
   const taken = new Set([...Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c), ...(match()?.bots || []).map((b) => b.c)]);
